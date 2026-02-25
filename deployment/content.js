@@ -1,7 +1,3 @@
-/**
- * Content script operating within the active webpage context.
- * Handles DOM extraction, messaging payload to the service worker, and DOM injection.
- */
 (function() {
     'use strict';
 
@@ -16,6 +12,16 @@
             const responseContainer = container.querySelector('.qt-response');
 
             if (!questionNode) return;
+
+            const parentGroup = container.closest('.qt-question-group');
+            let caseStudyText = "";
+            
+            if (parentGroup) {
+                const introNode = parentGroup.querySelector('.qt-introduction');
+                if (introNode) {
+                    caseStudyText = introNode.textContent.replace(/\s+/g, ' ').trim();
+                }
+            }
 
             const questionText = questionNode.textContent.replace(/\s+/g, ' ').trim();
             const imageUrl = imageNode ? imageNode.src : null;
@@ -39,6 +45,7 @@
                     question_id: index + 1,
                     question_type: questionType,
                     question_text: questionText,
+                    case_study_text: caseStudyText,
                     image_url: imageUrl,
                     options: options
                 });
@@ -98,7 +105,6 @@
             return;
         }
 
-        // Delegate network request to the background service worker
         chrome.runtime.sendMessage({ action: "SOLVE_EXAM", payload: payload }, (response) => {
             if (chrome.runtime.lastError) {
                 console.error("Message dispatch failure:", chrome.runtime.lastError);

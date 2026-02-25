@@ -7,12 +7,8 @@ from flask_cors import CORS
 from openai import AsyncOpenAI
 from pydantic import BaseModel
 from dotenv import load_dotenv
-from datetime import datetime
-import pytz
 
 load_dotenv()
-
-IST = pytz.timezone("Asia/Kolkata")
 
 app = Flask(__name__)
 CORS(app)
@@ -44,14 +40,14 @@ async def fetch_image_base64(session: aiohttp.ClientSession, url: str) -> str | 
         return None
 
 async def evaluate_single_question(session: aiohttp.ClientSession, question: dict) -> dict | None:
-    """Processes a single question, routing to the appropriate Pydantic schema based on question type."""
+    """Processes a single question, handling case study context and dynamically routing to the appropriate Pydantic schema."""
     question_id = question.get("question_id")
     question_type = question.get("question_type", "mcq")
     question_text = question.get("question_text", "")
+    case_study_text = question.get("case_study_text", "")
     image_url = question.get("image_url")
     options = question.get("options", [])
 
-    # Construct the base system prompt instructions based on the expected output type
     if question_type == "numerical":
         response_format = TextAnswer
         system_prompt = (
@@ -76,10 +72,17 @@ async def evaluate_single_question(session: aiohttp.ClientSession, question: dic
             "Determine the correct option. Return the integer index of the strictly correct option."
         )
 
-    # Build multimodal user payload
     user_content = []
+    text_parts = []
+    
+    if case_study_text:
+        text_parts.append(f"Context / Case Study:\n{case_study_text}\n")
     if question_text:
-        user_content.append({"type": "text", "text": f"Question: {question_text}"})
+        text_parts.append(f"Question:\n{question_text}")
+        
+    combined_text = "\n".join(text_parts)
+    if combined_text:
+        user_content.append({"type": "text", "text": combined_text})
         
     if image_url:
         base64_image = await fetch_image_base64(session, image_url)
@@ -107,7 +110,6 @@ async def evaluate_single_question(session: aiohttp.ClientSession, question: dic
         
         parsed_result = response.choices[0].message.parsed
         
-        # Standardize output format for the frontend injection script
         result_payload = {
             "question_id": question_id,
             "question_type": question_type,
@@ -118,9 +120,8 @@ async def evaluate_single_question(session: aiohttp.ClientSession, question: dic
             }
         }
 
-        # Map parsed Pydantic attributes to standard JSON dictionary keys
         if question_type == "numerical":
-            result_payload["text_answer"] = parsed_result.text_answer
+            result_payload["text_answer"] = str(parsed_result.text_answer)
         elif question_type == "msq":
             result_payload["option_indices"] = parsed_result.option_indices
         else:
@@ -147,9 +148,6 @@ async def process_batch(payload: list) -> dict:
             "total_tokens": sum(res.get("tokens_used", {}).get("total_tokens", 0) for res in valid_results)
         }
         
-        with open("token_usage.log", "a") as log_file:
-            log_entry = f"{datetime.now(IST).isoformat()} - Batch processed: {token_summary}\n"
-            log_file.write(log_entry)
         return {
             "results": valid_results,
             "token_summary": token_summary

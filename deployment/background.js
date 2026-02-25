@@ -1,7 +1,3 @@
-/**
- * Service Worker orchestrating cross-origin network requests.
- * Executes in an isolated context to bypass page-level CSP enforcement.
- */
 chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
     if (request.action === "SOLVE_EXAM") {
         fetch('http://127.0.0.1:5000/api/solve', {
@@ -25,7 +21,6 @@ chrome.runtime.onMessage.addListener((request, sender, sendResponse) => {
             sendResponse({ success: false, error: error.message });
         });
 
-        // Returning true strictly required to indicate an asynchronous response via sendResponse
         return true; 
     }
 });

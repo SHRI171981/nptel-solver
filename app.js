@@ -1,8 +1,8 @@
 // ==UserScript==
 // @name         Automated Exam Solver
 // @namespace    http://tampermonkey.net/
-// @version      1.1
-// @description  Extracts multi-format questions, fetches answers from local API, and injects them into the DOM.
+// @version      1.2
+// @description  Extracts multi-format questions (including case studies), fetches answers, and injects them.
 // @match        https://*.swayam.gov.in/*
 // @grant        none
 // ==/UserScript==
@@ -11,7 +11,7 @@
     'use strict';
 
     /**
-     * Extracts questions from the DOM, parsing MCQ, MSQ, and numerical/text inputs.
+     * Extracts questions, parsing MCQ, MSQ, numerical inputs, and parent case study contexts.
      * @returns {Array<Object>} Array of structured question payload objects.
      */
     function extractPayload() {
@@ -25,6 +25,17 @@
             const responseContainer = container.querySelector('.qt-response');
 
             if (!questionNode) return;
+
+            // Traverse the DOM upward to locate a parent question group and extract introduction text
+            const parentGroup = container.closest('.qt-question-group');
+            let caseStudyText = "";
+            
+            if (parentGroup) {
+                const introNode = parentGroup.querySelector('.qt-introduction');
+                if (introNode) {
+                    caseStudyText = introNode.textContent.replace(/\s+/g, ' ').trim();
+                }
+            }
 
             const questionText = questionNode.textContent.replace(/\s+/g, ' ').trim();
             const imageUrl = imageNode ? imageNode.src : null;
@@ -43,12 +54,12 @@
                 questionType = 'numerical';
             }
 
-            // Exclude empty questions to prevent API execution failures
             if (questionText || imageUrl) {
                 payload.push({
                     question_id: index + 1,
                     question_type: questionType,
                     question_text: questionText,
+                    case_study_text: caseStudyText,
                     image_url: imageUrl,
                     options: options
                 });
@@ -74,7 +85,6 @@
                 const inputField = container.querySelector('.qt-response input');
                 if (inputField) {
                     inputField.value = answer.text_answer;
-                    // Dispatch native events to trigger framework state updates (React/Angular)
                     inputField.dispatchEvent(new Event('input', { bubbles: true }));
                     inputField.dispatchEvent(new Event('change', { bubbles: true }));
                 }
@@ -97,7 +107,6 @@
      */
     function triggerFinalSubmission() {
         const submitButton = document.getElementById('submitbutton');
-        
         if (submitButton) {
             setTimeout(() => {
                 submitButton.click();
@@ -145,9 +154,6 @@
         }
     }
 
-    /**
-     * Binds pipeline execution to the Ctrl+Shift+S keyboard shortcut.
-     */
     document.addEventListener('keydown', function(event) {
         if (event.ctrlKey && event.shiftKey && event.key === 'S') {
             runPipeline();
