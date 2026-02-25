@@ -1,0 +1,24 @@
+{
+  "manifest_version": 3,
+  "name": "Automated Exam Solver",
+  "version": "1.0",
+  "description": "Extracts DOM payloads, interfaces with local VLM API, and injects automated answers.",
+  "permissions": [
+    "activeTab",
+    "scripting"
+  ],
+  "host_permissions": [
+    "https://*.swayam.gov.in/*",
+    "http://127.0.0.1:5000/*"
+  ],
+  "background": {
+    "service_worker": "background.js"
+  },
+  "content_scripts": [
+    {
+      "matches": ["https://*.onlinecourses.nptel.ac.in/*"],
+      "js": ["content.js"],
+      "run_at": "document_end"
+    }
+  ]
+}
