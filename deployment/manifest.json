@@ -9,6 +9,7 @@
   ],
   "host_permissions": [
     "https://*.swayam.gov.in/*",
+    "https://*.onlinecourses.nptel.ac.in/*",
     "http://127.0.0.1:5000/*"
   ],
   "background": {
