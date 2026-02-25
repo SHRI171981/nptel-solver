@@ -96,7 +96,7 @@
         }
     }
 
-    function runPipeline() {
+    function runPipeline(autoSubmit = false) {
         console.log("Initiating extraction pipeline...");
         const payload = extractPayload();
 
@@ -115,7 +115,9 @@
                 console.log("Answers resolved. Injecting into DOM...");
                 console.log("Token Summary:", response.data.token_summary);
                 applyAllAnswers(response.data.results);
-                triggerFinalSubmission();
+                if (autoSubmit) {
+                    triggerFinalSubmission();
+                }
             } else {
                 console.error("Pipeline API failure:", response.error);
             }
@@ -124,7 +126,16 @@
 
     document.addEventListener('keydown', function(event) {
         if (event.ctrlKey && event.shiftKey && event.key === 'S') {
-            runPipeline();
+            if (event.altKey){
+                if (confirm("Are you sure you want to trigger the NPTEL answer pipeline? This will auto-fill and submit your answers. Make sure to review the answers before submission. Click 'OK' to proceed or 'Cancel' to abort.")) {
+                    runPipeline(true);
+                }
+            }
+            else{
+                if (confirm("This will auto-fill your answers but NOT submit them. Review the answers before manually submitting. Click 'OK' to proceed or 'Cancel' to abort.")) {
+                    runPipeline(false);
+                }
+            }
         }
     });
 })();
