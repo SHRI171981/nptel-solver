@@ -1,0 +1,7 @@
+aiohttp
+flask
+flask-cors
+openai
+pydantic
+python-dotenv
+pytz
