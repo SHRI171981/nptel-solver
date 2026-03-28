@@ -1,20 +1,28 @@
 import asyncio
-import base64
 import os
 import aiohttp
 from flask import Flask, request, jsonify
 from flask_cors import CORS
-from openai import AsyncOpenAI
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 from dotenv import load_dotenv
+from typing import Optional, Union
+from datetime import datetime
+
+from pydantic_ai import Agent, BinaryContent
+from pydantic_ai.models.google import GoogleModel
+from pydantic_ai.providers.google import GoogleProvider
 
 load_dotenv()
 
 app = Flask(__name__)
 CORS(app)
 
-MODEL = os.environ.get("MODEL", "gpt-4o-mini")
-client = AsyncOpenAI(api_key=os.environ.get("OPENAI_API_KEY"))
+# --- LLM Provider Configuration ---
+
+provider = GoogleProvider(api_key=os.environ.get("GEMINI_API_KEY"))
+model = GoogleModel(os.environ.get("MODEL", "gemini-2.5-flash"), provider=provider)
+
+# --- VLM Output Schemas ---
 
 class MCQAnswer(BaseModel):
     """Schema for Single-Select Multiple Choice Questions."""
@@ -28,141 +36,196 @@ class TextAnswer(BaseModel):
     """Schema for Numerical or String input questions."""
     text_answer: str
 
-async def fetch_image_base64(session: aiohttp.ClientSession, url: str) -> str | None:
-    """Asynchronously retrieves image binary data and returns a base64 encoded string."""
+# --- Application Data Schemas ---
+
+class QuestionPayload(BaseModel):
+    """Schema defining the required structure for incoming question data."""
+    question_id: Union[str, int]
+    question_type: str = Field(default="mcq")
+    question_text: Optional[str] = ""
+    case_study_text: Optional[str] = ""
+    image_url: Optional[str] = None
+    options: list[str] = Field(default_factory=list)
+
+class TokenUsage(BaseModel):
+    """Schema for individual question token consumption."""
+    input_tokens: int
+    output_tokens: int
+
+class QuestionResult(BaseModel):
+    """Schema for the standardized output of a processed question."""
+    question_id: Union[str, int]
+    question_type: Optional[str] = None
+    tokens_used: Optional[TokenUsage] = None
+    text_answer: Optional[str] = None
+    option_indices: Optional[list[int]] = None
+    error: Optional[str] = None
+
+class TokenSummary(BaseModel):
+    """Schema for aggregate batch token consumption metrics."""
+    total_questions: int
+    total_input_tokens: int
+    total_output_tokens: int
+
+class BatchResult(BaseModel):
+    """Schema for the final API response payload."""
+    results: list[QuestionResult]
+    token_summary: TokenSummary
+
+# --- Agent Definitions ---
+
+numerical_agent = Agent(
+    model,
+    output_type=TextAnswer,
+    instructions=(
+        "Analyze the provided educational question.\n"
+        "Solve the problem and return ONLY the final numerical or string answer required.\n"
+        "Do not include units unless explicitly requested."
+    )
+)
+
+msq_agent = Agent(
+    model,
+    output_type=MSQAnswer,
+    instructions=(
+        "Analyze the provided educational question and the corresponding options.\n"
+        "Determine the correct options. Return an array containing the integer indices of ALL correct options."
+    )
+)
+
+mcq_agent = Agent(
+    model,
+    output_type=MCQAnswer,
+    instructions=(
+        "Analyze the provided educational question and the corresponding options.\n"
+        "Determine the correct option. Return the integer index of the strictly correct option."
+    )
+)
+
+# --- Core Logic ---
+
+async def fetch_image_base64(session: aiohttp.ClientSession, url: str) -> bytes | None:
+    """Asynchronously retrieves image binary data. Returns raw bytes for BinaryContent structure."""
     try:
         async with session.get(url, timeout=10) as response:
             response.raise_for_status()
-            image_data = await response.read()
-            return base64.b64encode(image_data).decode('utf-8')
+            return await response.read()
     except aiohttp.ClientError as e:
         print(f"Network error fetching image {url}: {e}")
         return None
 
-async def evaluate_single_question(session: aiohttp.ClientSession, question: dict) -> dict | None:
-    """Processes a single question, handling case study context and dynamically routing to the appropriate Pydantic schema."""
-    question_id = question.get("question_id")
-    question_type = question.get("question_type", "mcq")
-    question_text = question.get("question_text", "")
-    case_study_text = question.get("case_study_text", "")
-    image_url = question.get("image_url")
-    options = question.get("options", [])
-
-    if question_type == "numerical":
-        response_format = TextAnswer
-        system_prompt = (
-            "Analyze the provided educational question.\n"
-            "Solve the problem and return ONLY the final numerical or string answer required.\n"
-            "Do not include units unless explicitly requested."
-        )
-    elif question_type == "msq":
-        response_format = MSQAnswer
-        options_text = "\n".join([f"Index {i}: {opt}" for i, opt in enumerate(options)])
-        system_prompt = (
-            "Analyze the provided educational question and the corresponding options.\n"
-            f"Options:\n{options_text}\n\n"
-            "Determine the correct options. Return an array containing the integer indices of ALL correct options."
-        )
-    else:
-        response_format = MCQAnswer
-        options_text = "\n".join([f"Index {i}: {opt}" for i, opt in enumerate(options)])
-        system_prompt = (
-            "Analyze the provided educational question and the corresponding options.\n"
-            f"Options:\n{options_text}\n\n"
-            "Determine the correct option. Return the integer index of the strictly correct option."
-        )
-
-    user_content = []
-    text_parts = []
+async def evaluate_single_question(session: aiohttp.ClientSession, question: QuestionPayload) -> QuestionResult:
+    """Processes a typed question payload via dedicated Agents and maps the output property."""
+    prompt_parts = []
     
-    if case_study_text:
-        text_parts.append(f"Context / Case Study:\n{case_study_text}\n")
-    if question_text:
-        text_parts.append(f"Question:\n{question_text}")
+    # Construct textual context
+    text_context = []
+    if question.case_study_text:
+        text_context.append(f"Context / Case Study:\n{question.case_study_text}\n")
+    if question.question_text:
+        text_context.append(f"Question:\n{question.question_text}")
+    
+    if question.question_type in ["mcq", "msq"] and question.options:
+        options_text = "\n".join([f"Index {i}: {opt}" for i, opt in enumerate(question.options)])
+        text_context.append(f"\nOptions:\n{options_text}")
         
-    combined_text = "\n".join(text_parts)
+    combined_text = "\n".join(text_context)
     if combined_text:
-        user_content.append({"type": "text", "text": combined_text})
+        prompt_parts.append(combined_text)
         
-    if image_url:
-        base64_image = await fetch_image_base64(session, image_url)
-        if base64_image:
-            user_content.append({
-                "type": "image_url",
-                "image_url": {
-                    "url": f"data:image/jpeg;base64,{base64_image}",
-                    "detail": "low"
-                }
-            })
+    # Construct multimodal context
+    if question.image_url:
+        image_bytes = await fetch_image_base64(session, question.image_url)
+        if image_bytes:
+            prompt_parts.append(BinaryContent(data=image_bytes, media_type='image/jpeg'))
         else:
-            return {"question_id": question_id, "error": "Image fetch failed"}
+            return QuestionResult(question_id=question.question_id, error="Image fetch failed")
 
+    # Route to appropriate Agent based on payload definition
     try:
-        response = await client.beta.chat.completions.parse(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": user_content}
-            ],
-            response_format=response_format,
-            temperature=0.0
-        )
-        
-        parsed_result = response.choices[0].message.parsed
-        
-        result_payload = {
-            "question_id": question_id,
-            "question_type": question_type,
-            "tokens_used": {
-                "input_tokens": response.usage.prompt_tokens,
-                "output_tokens": response.usage.completion_tokens,
-                "total_tokens": response.usage.total_tokens
-            }
-        }
-
-        if question_type == "numerical":
-            result_payload["text_answer"] = str(parsed_result.text_answer)
-        elif question_type == "msq":
-            result_payload["option_indices"] = parsed_result.option_indices
+        if question.question_type == "numerical":
+            run_result = await numerical_agent.run(prompt_parts)
+        elif question.question_type == "msq":
+            run_result = await msq_agent.run(prompt_parts)
         else:
-            result_payload["option_indices"] = [parsed_result.option_index]
+            run_result = await mcq_agent.run(prompt_parts)
+            
+        usage_data = run_result.usage()
+        tokens = TokenUsage(
+            input_tokens=usage_data.input_tokens if usage_data else 0,
+            output_tokens=usage_data.output_tokens if usage_data else 0,
+        )
 
-        return result_payload
+        result = QuestionResult(
+            question_id=question.question_id,
+            question_type=question.question_type,
+            tokens_used=tokens
+        )
+
+        # Map dynamic agent output directly to unified response schema
+        if isinstance(run_result.output, TextAnswer):
+            result.text_answer = run_result.output.text_answer
+        elif isinstance(run_result.output, MSQAnswer):
+            result.option_indices = run_result.output.option_indices
+        elif isinstance(run_result.output, MCQAnswer):
+            result.option_indices = [run_result.output.option_index]
+
+        return result
 
     except Exception as e:
-        print(f"VLM evaluation failed for question {question_id}: {e}")
-        return {"question_id": question_id, "error": "VLM processing failed"}
+        print(f"Agent execution failed for question {question.question_id}: {e}")
+        return QuestionResult(question_id=question.question_id, error="Agent processing failed")
 
-async def process_batch(payload: list) -> dict:
-    """Orchestrates concurrent execution of API calls and aggregates token utilization metrics."""
+async def process_batch(payload: list[QuestionPayload]) -> BatchResult:
+    """Orchestrates concurrent execution of Agent runs and aggregates token utilization metrics."""
     async with aiohttp.ClientSession() as session:
         tasks = [evaluate_single_question(session, question) for question in payload]
         results = await asyncio.gather(*tasks, return_exceptions=True)
         
-        valid_results = [res for res in results if isinstance(res, dict)]
+        valid_results = [res for res in results if isinstance(res, QuestionResult)]
         
-        token_summary = {
-            "total_questions": len(valid_results),
-            "total_input_tokens": sum(res.get("tokens_used", {}).get("input_tokens", 0) for res in valid_results),
-            "total_output_tokens": sum(res.get("tokens_used", {}).get("output_tokens", 0) for res in valid_results),
-            "total_tokens": sum(res.get("tokens_used", {}).get("total_tokens", 0) for res in valid_results)
+        total_in = sum(res.tokens_used.input_tokens for res in valid_results if res.tokens_used)
+        total_out = sum(res.tokens_used.output_tokens for res in valid_results if res.tokens_used)
+
+        token_summary = TokenSummary(
+            total_questions=len(valid_results),
+            total_input_tokens=total_in,
+            total_output_tokens=total_out,
+        )
+        
+        # Format timestamp and target log data execution state
+        timestamp = datetime.now().astimezone().isoformat()
+        log_payload = {
+            'total_questions': len(valid_results),
+            'total_input_tokens': total_in,
+            'total_output_tokens': total_out,
+            'total_tokens': total_in + total_out
         }
         
-        return {
-            "results": valid_results,
-            "token_summary": token_summary
-        }
+        # Append target execution string cleanly to physical log
+        with open('tokens.log', 'a') as log_file:
+            log_file.write(f"{timestamp} - Batch processed: {log_payload}\n")
+        
+        return BatchResult(
+            results=valid_results,
+            token_summary=token_summary
+        )
 
 @app.route('/api/solve', methods=['POST'])
 def solve_exam():
-    """Synchronous Flask route bridging the HTTP request to the asynchronous event loop."""
-    payload = request.get_json()
-    if not payload or not isinstance(payload, list):
+    """Synchronous Flask route handling input validation and executing the event loop."""
+    raw_payload = request.get_json()
+    if not raw_payload or not isinstance(raw_payload, list):
         return jsonify({"error": "Invalid payload format. Expected JSON array."}), 400
 
     try:
-        resolved_answers = asyncio.run(process_batch(payload))
-        return jsonify(resolved_answers), 200
+        validated_payload = [QuestionPayload.model_validate(item) for item in raw_payload]
+    except Exception as e:
+        return jsonify({"error": f"Schema validation failed: {str(e)}"}), 422
+
+    try:
+        resolved_answers = asyncio.run(process_batch(validated_payload))
+        return jsonify(resolved_answers.model_dump()), 200
     except Exception as e:
         print(f"Batch processing error: {e}")
         return jsonify({"error": "Internal server processing failure."}), 500
